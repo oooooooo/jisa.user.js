@@ -4,11 +4,16 @@ import { describe, expect, it } from "vitest";
 const require = createRequire(import.meta.url);
 const { findTimes } = require("../tz.user.js");
 
-const WINTER = new Date("2026-01-15T00:00:00Z");
-const SUMMER = new Date("2026-07-15T00:00:00Z");
+const WINTER = Temporal.Instant.from("2026-01-15T00:00:00Z");
+const SUMMER = Temporal.Instant.from("2026-07-15T00:00:00Z");
+
+const TOKYO = "Asia/Tokyo";
 
 const jstOf = (text, now = WINTER) =>
-	findTimes(text, now).map((time) => time.jst);
+	findTimes(text, now, TOKYO).map((time) => time.converted);
+
+const convertTo = (timeZone, text, now = WINTER) =>
+	findTimes(text, now, timeZone).map((time) => time.converted);
 
 describe("findTimes", () => {
 	it.each([
@@ -78,17 +83,20 @@ describe("findTimes", () => {
 	});
 
 	it("includes the month-name date in the source", () => {
-		expect(findTimes("Fri, Nov 6, 2026 10:00 PM PST.", WINTER)).toEqual([
-			{ source: "Nov 6, 2026 10:00 PM PST", jst: "2026-11-07 15:00 JST" },
+		expect(findTimes("Fri, Nov 6, 2026 10:00 PM PST.", WINTER, TOKYO)).toEqual([
+			{
+				source: "Nov 6, 2026 10:00 PM PST",
+				converted: "2026-11-07 15:00 JST",
+			},
 		]);
 	});
 
 	it("returns every time in the text together with its source", () => {
 		expect(
-			findTimes("Meeting at 10:00 PST and 2026-11-06T10:00Z.", WINTER),
+			findTimes("Meeting at 10:00 PST and 2026-11-06T10:00Z.", WINTER, TOKYO),
 		).toEqual([
-			{ source: "10:00 PST", jst: "03:00 JST (+1d)" },
-			{ source: "2026-11-06T10:00Z", jst: "2026-11-06 19:00 JST" },
+			{ source: "10:00 PST", converted: "03:00 JST (+1d)" },
+			{ source: "2026-11-06T10:00Z", converted: "2026-11-06 19:00 JST" },
 		]);
 	});
 
@@ -98,14 +106,64 @@ describe("findTimes", () => {
 		"UTC",
 		"10:00 ESTIMATE",
 		"version 1.10:00 UTC",
-		"10:00 JST",
-		"2026-11-06 19:00 JST",
 		"25:00 UTC",
 		"10:61 UTC",
 		"13pm UTC",
 		"Feb 30, 2026 10:00 UTC",
 		"Nov 6, 2026",
+		"10:00+2400",
+		"10:00+1260",
+		"10:00 UTC+25",
+		"10:00 GMT+5:60",
 	])("finds nothing in %s", (input) => {
 		expect(jstOf(input)).toEqual([]);
+	});
+
+	describe("target time zone", () => {
+		it("labels the result with the zone abbreviation when there is one", () => {
+			expect(convertTo("Europe/Paris", "10:00 UTC")).toEqual(["11:00 CET"]);
+			expect(convertTo("Europe/London", "10:00 UTC", SUMMER)).toEqual([
+				"11:00 BST",
+			]);
+			expect(convertTo("UTC", "10:00 PST")).toEqual(["18:00 UTC"]);
+		});
+
+		it("falls back to a GMT offset label", () => {
+			expect(convertTo("Asia/Kolkata", "10:00 UTC")).toEqual([
+				"15:30 GMT+5:30",
+			]);
+		});
+
+		it("applies DST of the target zone", () => {
+			expect(convertTo("America/New_York", "10:00 UTC", WINTER)).toEqual([
+				"05:00 EST",
+			]);
+			expect(convertTo("America/New_York", "10:00 UTC", SUMMER)).toEqual([
+				"06:00 EDT",
+			]);
+			expect(
+				convertTo("America/New_York", "2026-07-01 10:00 UTC", WINTER),
+			).toEqual(["2026-07-01 06:00 EDT"]);
+		});
+
+		// Temporal's "compatible" disambiguation, the same rule as Date.
+		it("moves a time skipped by DST forward and picks the earlier of a repeated time", () => {
+			expect(jstOf("2026-03-08 02:30 PT")).toEqual(["2026-03-08 19:30 JST"]);
+			expect(jstOf("2026-11-01 01:30 PT")).toEqual(["2026-11-01 17:30 JST"]);
+		});
+
+		it("reads JST as a source zone", () => {
+			expect(convertTo("America/New_York", "10:00 JST")).toEqual([
+				"20:00 EST (-1d)",
+			]);
+		});
+
+		it("defaults to the local time zone", () => {
+			const local = Temporal.Now.timeZoneId();
+
+			expect(findTimes("10:00 PST", WINTER)).toEqual(
+				findTimes("10:00 PST", WINTER, local),
+			);
+		});
 	});
 });

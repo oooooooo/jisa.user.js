@@ -2,16 +2,14 @@
 // @name         tz.user.js
 // @namespace    https://github.com/oooooooo/tz.user.js
 // @version      0.1.0
-// @description  Show the JST equivalent of a selected time in a popup
+// @description  Convert a selected time to your time zone in a popup
 // @match        *://*/*
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @run-at       document-idle
 // ==/UserScript==
 
 (() => {
-	const JST_OFFSET = 9 * 60;
-	const MINUTES_PER_DAY = 24 * 60;
-
 	// Abbreviations are ambiguous worldwide (CST, IST, BST, ...). The most common
 	// meaning on English-language pages wins: CST is US Central, IST is India.
 	const FIXED_OFFSETS = {
@@ -33,6 +31,7 @@
 		HKT: 480,
 		AWST: 480,
 		KST: 540,
+		JST: 540,
 		ACST: 570,
 		ACDT: 630,
 		AEST: 600,
@@ -115,8 +114,7 @@
 
 	const pad = (n) => String(n).padStart(2, "0");
 
-	const mod = (n, m) => ((n % m) + m) % m;
-
+	// Returns null for times that do not exist, such as 25:00 or 13pm.
 	function parseClock(text) {
 		const match = /^(\d{1,2})(?::(\d{2}))?.*?(?:([aApP])\.?[mM]\.?)?$/.exec(
 			text,
@@ -131,145 +129,164 @@
 		} else if (hour > 23) {
 			return null;
 		}
-		return hour * 60 + minute;
+		return Temporal.PlainTime.from({ hour, minute });
 	}
 
+	// "+05:30", "-3" and "+0100" to minutes east of UTC, or null when out of
+	// range. Temporal would carry "+1260" over to +13:00 and reject "+2400".
 	function parseSignedOffset(text) {
 		const match = /^([+-])(\d{1,2})(?::?(\d{2}))?$/.exec(text);
-		const minutes = Number(match[2]) * 60 + Number(match[3] ?? 0);
-		return match[1] === "-" ? -minutes : minutes;
+		const hours = Number(match[2]);
+		const minutes = Number(match[3] ?? 0);
+		if (hours > 23 || minutes > 59) return null;
+		const total = hours * 60 + minutes;
+		return match[1] === "-" ? -total : total;
 	}
 
-	function ianaOffset(timeZone, date) {
-		const name = new Intl.DateTimeFormat("en-US", {
-			timeZone,
-			timeZoneName: "longOffset",
-		})
-			.formatToParts(date)
-			.find((part) => part.type === "timeZoneName").value;
-		return name === "GMT" ? 0 : parseSignedOffset(name.slice(3));
+	// Temporal accepts "+05:30" as a fixed-offset time zone.
+	function offsetTimeZone(minutes) {
+		if (minutes === null) return null;
+		const sign = minutes < 0 ? "-" : "+";
+		const abs = Math.abs(minutes);
+		return `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
 	}
 
-	// Returns a function from an instant to the zone's UTC offset in minutes.
-	function resolveZone(groups) {
+	function sourceTimeZone(groups) {
 		if (groups.offset) {
-			const offset =
-				groups.offset === "Z" ? 0 : parseSignedOffset(groups.offset);
-			return () => offset;
+			return groups.offset === "Z"
+				? "UTC"
+				: offsetTimeZone(parseSignedOffset(groups.offset));
 		}
 		const name = groups.zone ?? groups.parenZone;
-		if (name in GENERIC_ZONES) {
-			return (date) => ianaOffset(GENERIC_ZONES[name], date);
-		}
-		if (name in FIXED_OFFSETS) {
-			return () => FIXED_OFFSETS[name];
-		}
-		const offset = parseSignedOffset(name.slice(3));
-		return () => offset;
+		if (name in GENERIC_ZONES) return GENERIC_ZONES[name];
+		if (name in FIXED_OFFSETS) return offsetTimeZone(FIXED_OFFSETS[name]);
+		return offsetTimeZone(parseSignedOffset(name.slice(3)));
 	}
 
 	// Returns null when the text has no date. A null year means the year was omitted.
 	function dateParts(groups) {
 		if (groups.isoDate !== undefined) {
 			const [year, month, day] = groups.isoDate.split("-").map(Number);
-			return { year, month: month - 1, day };
+			return { year, month, day };
 		}
 		const monthName = groups.mdyMonth ?? groups.dmyMonth;
 		if (monthName === undefined) return null;
 		const year = groups.mdyYear ?? groups.dmyYear;
 		return {
 			year: year === undefined ? null : Number(year),
-			month: MONTHS.indexOf(monthName.slice(0, 3)),
+			month: MONTHS.indexOf(monthName.slice(0, 3)) + 1,
 			day: Number(groups.mdyDay ?? groups.dmyDay),
 		};
 	}
 
 	// Returns null for dates that do not exist, such as Feb 30.
-	function utcDate(year, month, day) {
-		const ms = Date.UTC(year, month, day);
-		const date = new Date(ms);
-		if (date.getUTCMonth() !== month || date.getUTCDate() !== day) {
-			return null;
+	function plainDate(year, month, day) {
+		try {
+			return Temporal.PlainDate.from(
+				{ year, month, day },
+				{ overflow: "reject" },
+			);
+		} catch (error) {
+			if (error instanceof RangeError) return null;
+			throw error;
 		}
-		return ms;
 	}
 
 	// "Dec 31" read on Jan 1 means last year's Dec 31, so pick the closest candidate.
-	function closestYearDate(month, day, now) {
-		const year = now.getUTCFullYear();
-		const candidates = [year - 1, year, year + 1]
-			.map((y) => utcDate(y, month, day))
-			.filter((ms) => ms !== null);
+	function closestYearDate(month, day, today) {
+		const distance = (date) => Math.abs(today.until(date).days);
+		const candidates = [today.year - 1, today.year, today.year + 1]
+			.map((year) => plainDate(year, month, day))
+			.filter((date) => date !== null);
 		if (candidates.length === 0) return null;
-		const distance = (ms) => Math.abs(ms - now.getTime());
-		return candidates.reduce((best, ms) =>
-			distance(ms) < distance(best) ? ms : best,
+		return candidates.reduce((best, date) =>
+			distance(date) < distance(best) ? date : best,
 		);
 	}
 
-	function formatJstDate(utcMs) {
-		const jst = new Date(utcMs + JST_OFFSET * 60_000);
-		return `${jst.getUTCFullYear()}-${pad(jst.getUTCMonth() + 1)}-${pad(jst.getUTCDate())}`;
-	}
+	const localTimeZone = () => Temporal.Now.timeZoneId();
 
-	function formatClock(minutes) {
-		const m = mod(minutes, MINUTES_PER_DAY);
-		return `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
-	}
-
-	function convertDated(dateMs, start, end, offsetAt) {
-		const toUtc = (localMinutes) => {
-			const localMs = dateMs + localMinutes * 60_000;
-			// Look up the offset twice so that the instant used lies on the right side of a DST switch.
-			const guess = localMs - offsetAt(new Date(localMs)) * 60_000;
-			return localMs - offsetAt(new Date(guess)) * 60_000;
-		};
-		const startUtc = toUtc(start);
-		const startJst = Math.floor(startUtc / 60_000) + JST_OFFSET;
-		let clock = formatClock(startJst);
-		if (end !== null) {
-			clock += `–${formatClock(Math.floor(toUtc(end) / 60_000) + JST_OFFSET)}`;
+	function isValidTimeZone(timeZone) {
+		try {
+			new Temporal.ZonedDateTime(0n, timeZone);
+			return true;
+		} catch {
+			return false;
 		}
-		return `${formatJstDate(startUtc)} ${clock} JST`;
 	}
 
-	function convertUndated(start, end, offset) {
-		const toJst = (localMinutes) => localMinutes - offset + JST_OFFSET;
-		const startJst = toJst(start);
-		let clock = formatClock(startJst);
-		if (end !== null) {
-			clock += `–${formatClock(toJst(end))}`;
-		}
-		const shift = Math.floor(startJst / MINUTES_PER_DAY);
-		if (shift === 0) return `${clock} JST`;
-		return `${clock} JST (${shift > 0 ? "+" : ""}${shift}d)`;
+	// en-US knows US abbreviations, en-GB European ones and ja-JP knows JST;
+	// each gives "GMT+9"-style names for the zones it does not know.
+	const LABEL_LOCALES = ["en-US", "en-GB", "ja-JP"];
+
+	function zoneLabel(timeZone, instant) {
+		const names = LABEL_LOCALES.map(
+			(locale) =>
+				new Intl.DateTimeFormat(locale, { timeZone, timeZoneName: "short" })
+					.formatToParts(instant)
+					.find((part) => part.type === "timeZoneName").value,
+		);
+		return names.find((name) => !/^GMT[+-]/.test(name)) ?? names[0];
 	}
 
-	function convertMatch(match, now) {
+	const formatClock = (dateTime) =>
+		dateTime.toPlainTime().toString({ smallestUnit: "minute" });
+
+	function convert({ date, start, end, sourceZone, timeZone, dated }) {
+		const toTarget = (time) =>
+			date
+				.toZonedDateTime({ timeZone: sourceZone, plainTime: time })
+				.withTimeZone(timeZone);
+		const startTarget = toTarget(start);
+		let clock = formatClock(startTarget);
+		if (end !== null) clock += `–${formatClock(toTarget(end))}`;
+		const label = zoneLabel(timeZone, startTarget.toInstant());
+		const targetDate = startTarget.toPlainDate();
+		if (dated) return `${targetDate} ${clock} ${label}`;
+		const shift = date.until(targetDate).days;
+		if (shift === 0) return `${clock} ${label}`;
+		return `${clock} ${label} (${shift > 0 ? "+" : ""}${shift}d)`;
+	}
+
+	function convertMatch(match, now, timeZone) {
 		const { start, end } = match.groups;
-		const startMinutes = parseClock(start);
-		const endMinutes = end === undefined ? null : parseClock(end);
-		if (startMinutes === null || (end !== undefined && endMinutes === null)) {
+		const startTime = parseClock(start);
+		const endTime = end === undefined ? null : parseClock(end);
+		if (startTime === null || (end !== undefined && endTime === null)) {
 			return null;
 		}
-		const offsetAt = resolveZone(match.groups);
+		const sourceZone = sourceTimeZone(match.groups);
+		if (sourceZone === null) return null;
+		const today = now.toZonedDateTimeISO(sourceZone).toPlainDate();
 		const parts = dateParts(match.groups);
+		let date;
 		if (parts === null) {
-			return convertUndated(startMinutes, endMinutes, offsetAt(now));
+			date = today;
+		} else if (parts.year === null) {
+			date = closestYearDate(parts.month, parts.day, today);
+		} else {
+			date = plainDate(parts.year, parts.month, parts.day);
 		}
-		const dateMs =
-			parts.year === null
-				? closestYearDate(parts.month, parts.day, now)
-				: utcDate(parts.year, parts.month, parts.day);
-		if (dateMs === null) return null;
-		return convertDated(dateMs, startMinutes, endMinutes, offsetAt);
+		if (date === null) return null;
+		return convert({
+			date,
+			start: startTime,
+			end: endTime,
+			sourceZone,
+			timeZone,
+			dated: parts !== null,
+		});
 	}
 
-	function findTimes(text, now = new Date()) {
+	function findTimes(
+		text,
+		now = Temporal.Now.instant(),
+		timeZone = localTimeZone(),
+	) {
 		const times = [];
 		for (const match of text.matchAll(TIME_PATTERN)) {
-			const jst = convertMatch(match, now);
-			if (jst !== null) times.push({ source: match[0], jst });
+			const converted = convertMatch(match, now, timeZone);
+			if (converted !== null) times.push({ source: match[0], converted });
 		}
 		return times;
 	}
@@ -298,6 +315,13 @@
 		}
 		.row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 		.source { color: #6b6b6b; }
+		select {
+			max-width: 100%;
+			margin-bottom: 4px;
+			color: inherit;
+			background: transparent;
+			font: 12px/1.6 system-ui, sans-serif;
+		}
 		button {
 			padding: 0 6px;
 			border: 1px solid #c8c8c8;
@@ -398,24 +422,76 @@
 		return button;
 	}
 
-	function buildPopup(doc, times, { copy, close }) {
+	// Settings are shared across sites through the userscript manager's storage;
+	// page storage such as localStorage is separate for every site.
+	const userscriptSettings = {
+		get: () =>
+			typeof GM_getValue === "function" ? GM_getValue("timeZone") : undefined,
+		set: (timeZone) => {
+			if (typeof GM_setValue === "function") GM_setValue("timeZone", timeZone);
+		},
+	};
+
+	// An empty string stands for the local time zone.
+	function storedTimeZone(settings) {
+		const timeZone = settings.get();
+		return timeZone && isValidTimeZone(timeZone) ? timeZone : "";
+	}
+
+	function buildZoneSelect(doc, selected) {
+		const select = doc.createElement("select");
+		select.setAttribute("aria-label", "Time zone");
+		// Some engines leave UTC out of supportedValuesOf.
+		const zones = new Set(["UTC", ...Intl.supportedValuesOf("timeZone")]);
+		if (selected) zones.add(selected);
+		const local = doc.createElement("option");
+		local.value = "";
+		local.textContent = `Local (${localTimeZone()})`;
+		select.append(local);
+		for (const zone of zones) {
+			const option = doc.createElement("option");
+			option.value = zone;
+			option.textContent = zone;
+			select.append(option);
+		}
+		select.value = selected;
+		return select;
+	}
+
+	function buildRow(doc, { source, converted }, copy) {
+		const row = doc.createElement("div");
+		row.className = "row";
+		const sourceText = doc.createElement("span");
+		sourceText.className = "source";
+		sourceText.textContent = `${source} →`;
+		const convertedText = doc.createElement("strong");
+		convertedText.textContent = converted;
+		row.append(
+			sourceText,
+			convertedText,
+			buildCopyButton(doc, converted, copy),
+		);
+		return row;
+	}
+
+	function buildPopup(doc, { text, now, settings, copy, close }) {
 		const popup = doc.createElement("div");
 		popup.className = "popup";
 		const closeButton = buildButton(doc, "Close", "×");
 		closeButton.className = "close";
 		closeButton.addEventListener("click", close);
-		popup.append(closeButton);
-		for (const { source, jst } of times) {
-			const row = doc.createElement("div");
-			row.className = "row";
-			const sourceText = doc.createElement("span");
-			sourceText.className = "source";
-			sourceText.textContent = `${source} →`;
-			const jstText = doc.createElement("strong");
-			jstText.textContent = jst;
-			row.append(sourceText, jstText, buildCopyButton(doc, jst, copy));
-			popup.append(row);
-		}
+		const select = buildZoneSelect(doc, storedTimeZone(settings));
+		const rows = doc.createElement("div");
+		const render = () => {
+			const times = findTimes(text, now, select.value || localTimeZone());
+			rows.replaceChildren(...times.map((time) => buildRow(doc, time, copy)));
+		};
+		select.addEventListener("change", () => {
+			settings.set(select.value);
+			render();
+		});
+		render();
+		popup.append(closeButton, select, rows);
 		return popup;
 	}
 
@@ -431,8 +507,11 @@
 
 	function install(
 		doc = document,
-		now = () => new Date(),
-		copy = (text) => copyToClipboard(text, doc),
+		{
+			now = () => Temporal.Now.instant(),
+			copy = (text) => copyToClipboard(text, doc),
+			settings = userscriptSettings,
+		} = {},
 	) {
 		const win = doc.defaultView;
 		let host = null;
@@ -448,7 +527,7 @@
 		const isInsidePopup = (event) =>
 			host !== null && event.composedPath().includes(host);
 
-		const open = (times, rect) => {
+		const open = (text, rect) => {
 			close();
 			host = doc.createElement("div");
 			host.setAttribute(HOST_ATTRIBUTE, "");
@@ -456,7 +535,13 @@
 			const shadow = host.attachShadow({ mode: "open" });
 			const style = doc.createElement("style");
 			style.textContent = POPUP_STYLE;
-			const popup = buildPopup(doc, times, { copy, close });
+			const popup = buildPopup(doc, {
+				text,
+				now: now(),
+				settings,
+				copy,
+				close,
+			});
 			shadow.append(style, popup);
 			doc.documentElement.append(host);
 			place(popup, rect, win);
@@ -466,8 +551,9 @@
 			const selection = win.getSelection();
 			const text = selection?.toString() ?? "";
 			if (text.length === 0 || text.length > MAX_SELECTION_LENGTH) return;
-			const times = findTimes(text, now());
-			if (times.length > 0) open(times, selectionRect(selection));
+			if (findTimes(text, now()).length > 0) {
+				open(text, selectionRect(selection));
+			}
 		};
 
 		const onKeyUp = (event) => {
@@ -488,8 +574,10 @@
 		const onMouseDown = (event) => {
 			const insidePopup = isInsidePopup(event);
 			ignoreNextMouseUp = insidePopup;
-			// Buttons handle their own click; closing here would remove them before it fires.
-			if (insidePopup && event.composedPath()[0].closest?.("button")) return;
+			// Controls handle their own click; closing here would remove them before it fires.
+			if (insidePopup && event.composedPath()[0].closest?.("button, select")) {
+				return;
+			}
 			close();
 		};
 

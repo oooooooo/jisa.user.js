@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const require = createRequire(import.meta.url);
 const { install } = require("../tz.user.js");
 
-const NOW = new Date("2026-01-15T00:00:00Z");
+const NOW = Temporal.Instant.from("2026-01-15T00:00:00Z");
 const PAGE_HTML = "<p>Starts at <b>10:00 UTC</b> and ends at 11:00 PST.</p>";
 
 function select(node, start = 0, end = node.textContent.length) {
@@ -20,6 +20,14 @@ function select(node, start = 0, end = node.textContent.length) {
 const popupHost = () => document.querySelector("[data-tz-userjs]");
 
 const popupText = () => popupHost()?.shadowRoot.textContent ?? null;
+
+const zoneSelect = () => popupHost().shadowRoot.querySelector("select");
+
+function chooseZone(value) {
+	const select = zoneSelect();
+	select.value = value;
+	select.dispatchEvent(new Event("change", { bubbles: true }));
+}
 
 const popupButtons = (label) =>
 	[...popupHost().shadowRoot.querySelectorAll("button")].filter(
@@ -43,11 +51,13 @@ function openPopupFor(node, start, end) {
 describe("install", () => {
 	let uninstall;
 	let copy;
+	let settings;
 
 	beforeEach(() => {
 		document.body.innerHTML = PAGE_HTML;
 		copy = vi.fn(() => Promise.resolve());
-		uninstall = install(document, () => NOW, copy);
+		settings = { get: vi.fn(() => "Asia/Tokyo"), set: vi.fn() };
+		uninstall = install(document, { now: () => NOW, copy, settings });
 	});
 
 	afterEach(() => {
@@ -206,6 +216,60 @@ describe("install", () => {
 			openPopupFor(document.querySelector("p"), 0, 3);
 
 			expect(popupButtons("Close")).toHaveLength(1);
+		});
+	});
+
+	describe("time zone select", () => {
+		it("selects the stored time zone", () => {
+			openPopupFor(document.querySelector("b").firstChild);
+
+			expect(zoneSelect().value).toBe("Asia/Tokyo");
+		});
+
+		it("offers the local time zone first", () => {
+			settings.get.mockReturnValue(undefined);
+			const local = Temporal.Now.timeZoneId();
+			openPopupFor(document.querySelector("b").firstChild);
+
+			const [first] = zoneSelect().options;
+			expect(first.value).toBe("");
+			expect(first.textContent).toBe(`Local (${local})`);
+			expect(zoneSelect().value).toBe("");
+		});
+
+		it("falls back to the local time zone when the stored one is invalid", () => {
+			settings.get.mockReturnValue("Mars/Olympus_Mons");
+			openPopupFor(document.querySelector("b").firstChild);
+
+			expect(zoneSelect().value).toBe("");
+		});
+
+		it("converts again and remembers the choice", () => {
+			openPopupFor(document.querySelector("b").firstChild);
+
+			chooseZone("America/New_York");
+
+			expect(popupText()).toContain("05:00 EST");
+			expect(popupText()).not.toContain("JST");
+			expect(settings.set).toHaveBeenCalledWith("America/New_York");
+		});
+
+		it("copies the time converted to the chosen zone", () => {
+			openPopupFor(document.querySelector("b").firstChild);
+			chooseZone("America/New_York");
+
+			click(popupButtons("Copy")[0]);
+
+			expect(copy).toHaveBeenCalledWith("05:00 EST");
+		});
+
+		it("keeps the popup open while the select is used", () => {
+			openPopupFor(document.querySelector("b").firstChild);
+			const host = popupHost();
+
+			click(zoneSelect());
+
+			expect(popupHost()).toBe(host);
 		});
 	});
 });
