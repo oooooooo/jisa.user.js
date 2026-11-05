@@ -1,0 +1,16 @@
+{
+	"name": "tz.user.js",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Userscript that converts times on web pages to JST",
+	"license": "MIT",
+	"scripts": {
+		"test": "vitest run",
+		"lint": "biome check ."
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.6.5",
+		"jsdom": "^30.1.3",
+		"vitest": "^5.1.0"
+	}
+}
