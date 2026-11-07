@@ -1,8 +1,8 @@
 {
-	"name": "tz.user.js",
-	"version": "0.1.0",
+	"name": "jisa.user.js",
+	"version": "0.2.0",
 	"private": true,
-	"description": "Userscript that converts times on web pages to JST",
+	"description": "Userscript that converts a selected time to every time zone",
 	"license": "MIT",
 	"scripts": {
 		"test": "vitest run",

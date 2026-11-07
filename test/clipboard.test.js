@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const require = createRequire(import.meta.url);
-const { copyToClipboard } = require("../tz.user.js");
+const { copyToClipboard } = require("../jisa.user.js");
 
 const JST = "2026-11-06 00:00 JST";
 
