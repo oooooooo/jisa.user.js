@@ -20,15 +20,11 @@ a popup. The page itself is never modified.
 
 ## Usage
 
-- Select a time on any page to open the popup.
-- Selections inside text fields work too.
 - Each time is shown in your local time zone, with how far it is from now.
-  Click it to pick another zone from a list of every time zone; type in the
-  search box on top to narrow it down, for example `new york` or `EST`.
+  Click it to pick another zone; the search accepts `new york` or `EST`.
 - The last three zones you picked are listed first and shown under every time.
-- Copy the converted time with its Copy button.
+- Selections inside text fields work too.
 - Up to 20 times are shown at once.
-- Close the popup with the × button, by clicking anywhere, or with Escape.
 
 ## Install
 
