@@ -29,7 +29,9 @@ a popup. The page itself is never modified.
 ## Install
 
 Install [Tampermonkey](https://www.tampermonkey.net/) or
-[Violentmonkey](https://violentmonkey.github.io/), then open `jisa.user.js`.
+[Violentmonkey](https://violentmonkey.github.io/), then click
+[jisa.user.js](https://github.com/oooooooo/jisa.user.js/raw/refs/heads/main/jisa.user.js)
+to install the script.
 
 The script stores recently picked zones with `GM_getValue` and `GM_setValue`
 so they are shared across sites.
